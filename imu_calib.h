@@ -1,7 +1,9 @@
 #pragma once
-// IMU calibration persistence module
-// Saves/loads accelerometer and gyroscope offsets to NVS flash
-// so they survive power cycles and plane installation moves
+// =====================================================================
+//  imu_calib.h — IMU calibration persistence module
+//  Saves/loads accelerometer and gyroscope offsets to NVS flash
+//  so they survive power cycles and plane installation moves.
+// =====================================================================
 
 #include <Arduino.h>
 #include <Preferences.h>

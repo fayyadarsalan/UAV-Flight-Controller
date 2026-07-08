@@ -33,6 +33,14 @@
 //    Throttle at min + yaw FULL LEFT  held 1 s  →  DISARMED
 //    Motor is hard-blocked whenever disarmed, in every mode.
 //
+//  IMU CALIBRATION (NEW):
+//    Power on the board on your DESK (level), then:
+//    1. Set CH5 to MANUAL (down)
+//    2. Hold CH4 (yaw) FULL RIGHT for 3 seconds
+//    3. Serial will print calibration progress
+//    4. Once saved, remove power and install in plane at any angle
+//    5. On next boot, saved calibration loads automatically
+//
 //  Required libraries (Arduino Library Manager):
 //    • MAVLink        (official MAVLink library)
 //    • MPU6050_light  (rfetick)
@@ -51,6 +59,7 @@
 #include "params.h"
 #include "waypoint_mission.h"
 #include "gcs.h"
+#include "imu_calib.h"
 
 // ── Hardware objects ──────────────────────────────────────────────────
 MPU6050   mpu(Wire);
@@ -131,6 +140,95 @@ void writeThrottle(uint16_t us) {
 }
 
 // =====================================================================
+//  IMU Calibration Menu — interactive setup
+// =====================================================================
+void showCalibMenu() {
+  Serial.println("\n===============================================");
+  Serial.println("         IMU CALIBRATION MENU");
+  Serial.println("===============================================");
+  Serial.println("Options:");
+  Serial.println("  1 = Calibrate IMU now (keep level & still)");
+  Serial.println("  2 = Load saved calibration");
+  Serial.println("  3 = Clear saved calibration");
+  Serial.println("  4 = Show current offsets");
+  Serial.println("  5 = Continue with current settings");
+  Serial.println("===============================================");
+  Serial.println("Enter choice (1-5):");
+}
+
+void handleCalibMenu() {
+  showCalibMenu();
+  
+  unsigned long timeout = millis() + 30000;  // 30 second timeout
+  while (millis() < timeout) {
+    if (Serial.available()) {
+      char choice = Serial.read();
+      Serial.println(choice);
+      
+      switch (choice) {
+        case '1':
+          Serial.println("\n[IMU] Performing fresh calibration...");
+          Serial.println("Keep airframe LEVEL and STILL for 2 seconds...");
+          delay(2000);
+          mpu.calcOffsets(true, true);
+          imuCalibSave(mpu.getAccelOffsetX(), mpu.getAccelOffsetY(), mpu.getAccelOffsetZ(),
+                       mpu.getGyroOffsetX(), mpu.getGyroOffsetY(), mpu.getGyroOffsetZ());
+          Serial.println("[IMU] ✓ Calibration saved to flash!");
+          Serial.println("     You can now remove power and install in the plane.");
+          break;
+          
+        case '2':
+          if (imuCalibLoad()) {
+            Serial.println("[IMU] ✓ Loading saved calibration...");
+            mpu.setAccelOffsetX(imuOffsets.accelX);
+            mpu.setAccelOffsetY(imuOffsets.accelY);
+            mpu.setAccelOffsetZ(imuOffsets.accelZ);
+            mpu.setGyroOffsetX(imuOffsets.gyroX);
+            mpu.setGyroOffsetY(imuOffsets.gyroY);
+            mpu.setGyroOffsetZ(imuOffsets.gyroZ);
+            Serial.println("[IMU] Offsets applied.");
+          } else {
+            Serial.println("[IMU] ✗ No saved calibration found.");
+          }
+          break;
+          
+        case '3':
+          imuCalibClear();
+          Serial.println("[IMU] ✓ Saved calibration cleared.");
+          break;
+          
+        case '4':
+          Serial.println("\nCurrent IMU Offsets:");
+          Serial.print("  AccelX: "); Serial.println(mpu.getAccelOffsetX(), 6);
+          Serial.print("  AccelY: "); Serial.println(mpu.getAccelOffsetY(), 6);
+          Serial.print("  AccelZ: "); Serial.println(mpu.getAccelOffsetZ(), 6);
+          Serial.print("  GyroX:  "); Serial.println(mpu.getGyroOffsetX(), 6);
+          Serial.print("  GyroY:  "); Serial.println(mpu.getGyroOffsetY(), 6);
+          Serial.print("  GyroZ:  "); Serial.println(mpu.getGyroOffsetZ(), 6);
+          Serial.println();
+          showCalibMenu();
+          continue;  // prompt again
+          
+        case '5':
+          Serial.println("\n[IMU] Continuing with current offsets...");
+          return;
+          
+        default:
+          Serial.println("Invalid choice. Please enter 1-5.");
+          showCalibMenu();
+          continue;
+      }
+      
+      // After choice, continue flight
+      return;
+    }
+    delay(100);
+  }
+  
+  Serial.println("\n[IMU] Menu timeout — continuing with current settings.");
+}
+
+// =====================================================================
 //  Stabilization + surface mixing  (used by STABILIZE, RTH, AUTO)
 // =====================================================================
 void stabilizeAndFly(float targetRollDeg, float targetPitchDeg,
@@ -192,7 +290,7 @@ void navigateTo(double targetLat, double targetLon,
   stabilizeAndFly(targetRoll, 0.0f, throttleUs, dt);
 }
 
-// ── RTH ───────────────────────────────────────────────────────────────
+// ── RTH ────────────────────────────────────────────────────────────────
 void doRTH(float dt) {
   bool reached;
   navigateTo(
@@ -303,10 +401,20 @@ void setup() {
     Serial.println("[IMU] MPU-6050 not found — check wiring. Retrying…");
     delay(500);
   }
-  Serial.println("[IMU] Calibrating — keep airframe still and level…");
-  delay(1500);
-  mpu.calcOffsets(true, true);
-  Serial.println("[IMU] Calibration done.");
+  
+  // Try to load saved calibration first
+  if (imuCalibLoad()) {
+    Serial.println("[IMU] Loading saved calibration...");
+    mpu.setAccelOffsetX(imuOffsets.accelX);
+    mpu.setAccelOffsetY(imuOffsets.accelY);
+    mpu.setAccelOffsetZ(imuOffsets.accelZ);
+    mpu.setGyroOffsetX(imuOffsets.gyroX);
+    mpu.setGyroOffsetY(imuOffsets.gyroY);
+    mpu.setGyroOffsetZ(imuOffsets.gyroZ);
+    Serial.println("[IMU] ✓ Calibration loaded from flash.");
+  } else {
+    Serial.println("[IMU] No saved calibration found.");
+  }
 
   // RC receiver
   ibus.begin(IBUS_SERIAL, IBUS_BAUD, IBUS_RX_PIN);
@@ -327,6 +435,30 @@ void setup() {
   for (int i = 0; i < 5; i++) {
     esc.writeMicroseconds(RC_MIN);
     delay(100);
+  }
+
+  // ── Show calibration menu (interactive IMU setup) ──
+  if (ENABLE_CALIB_MENU) {
+    Serial.println("\n[SETUP] Waiting for RC input... (5 seconds)");
+    delay(500);
+    ibus.update();
+    delay(500);
+    ibus.update();
+    delay(500);
+    ibus.update();
+    delay(500);
+    ibus.update();
+    delay(500);
+    ibus.update();
+    
+    // Check if user triggered calibration: CH5 = MANUAL + CH4 (yaw) FULL RIGHT
+    uint16_t rawModeSw = ibus.channel(CH_MODE_SWITCH);
+    uint16_t rawYaw    = ibus.channel(CH_YAW);
+    
+    if (decodeModeSwitch(rawModeSw) == MODE_MANUAL && rawYaw > 1950) {
+      Serial.println("[SETUP] Calibration trigger detected (CH5=MANUAL, CH4=FULL RIGHT).");
+      handleCalibMenu();
+    }
   }
 
   lastLoopMicros = micros();

@@ -7,6 +7,15 @@
 //  on first boot / after a param reset.
 // =====================================================================
 
+// ---- Serial port for calibration menu ----
+// Set this to true to enable interactive calibration menu on startup
+#define ENABLE_CALIB_MENU  true
+
+// ---- Calibration command (hold this stick position for 3 sec during boot) ----
+// Set CH5 switch to this position and hold CH4 (yaw) FULL RIGHT for 3 seconds
+// to trigger IMU calibration. Set to MODE_MANUAL to enable.
+#define CALIB_TRIGGER_MODE MODE_MANUAL
+
 // ---------------- iBus receiver (FlySky FS-iA10B) ----------------
 // iBus is 5V logic — use a voltage divider (e.g. 1k signal->RX, 2k RX->GND)
 // before connecting to the ESP32 RX pin below.
