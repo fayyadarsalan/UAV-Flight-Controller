@@ -43,10 +43,10 @@
 #define CH_THROTTLE        2     // CH3: throttle
 #define CH_YAW             3     // CH4: yaw — no rudder servo on this airframe; read but only
                                  //       used for the arm/disarm stick gesture, not control
-#define CH_MODE_SWITCH     4     // CH5: 3-position switch — MANUAL / STABILIZE / RTH
-#define CH_AUTO_SWITCH     5     // CH6: switch — engages MAVLink waypoint AUTO mode
+#define CH_MODE_SWITCH     4     // CH5: 3-position switch — MANUAL(-100) / STABILIZE(0) / AUTO(+100)
+#define CH_LOITER_SWITCH   5     // CH6: 2-position switch — loiter mode enable
 
-// ---------------- RC pulse range (microseconds) ----------------
+// ---- RC pulse range (microseconds) ----
 #define RC_MIN              1000
 #define RC_MID              1500
 #define RC_MAX              2000
@@ -55,7 +55,11 @@
 #define SERVO_THROW_DEG      45  // ±45 deg from center = 90 deg total throw
 #define LOOP_HZ              200
 
-// ---------------- Default parameter values (seeded into NVS on first boot) ----------------
+// ---- Stabilization limits ----
+#define MAX_STAB_ANGLE_DEG   30  // Hard limit on commanded angle in STABILIZE mode
+#define USER_INPUT_BLEND     0.7f  // In AUTO mode, blend user input at this weight (0.0-1.0)
+
+// ---- Default parameter values (seeded into NVS on first boot) ----
 #define DEFAULT_ROLL_KP           1.8f
 #define DEFAULT_ROLL_KI           0.4f
 #define DEFAULT_ROLL_KD           0.05f

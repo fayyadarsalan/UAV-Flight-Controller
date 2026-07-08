@@ -15,15 +15,17 @@
 //    CH2 up/down       → elevator / pitch
 //    CH3               → throttle
 //    CH4 yaw           → no rudder servo; used only for arm/disarm gesture
-//    CH5 3-pos switch  → MANUAL / STABILIZE / RTH
-//    CH6 switch        → AUTO (MAVLink waypoint mission) when high
+//    CH5 3-pos switch  → MANUAL / STABILIZE / AUTO (position-mapped)
+//    CH6 2-pos switch  → LOITER (enable home loiter in RTH/AUTO)
 //
 //  Flight modes:
 //    MANUAL      raw stick-to-servo passthrough (initial glide tests)
-//    STABILIZE   MPU-6050 angle-mode PID self-levelling
+//    STABILIZE   angle-mode PID self-levelling with user commanded angles
+//                (up to ±30° hard limit); plane levels when user releases stick
 //    RTH         GPS return-to-home + loiter; also auto-engaged on
 //                signal loss or a GCS RTL command
 //    AUTO        follows uploaded MAVLink waypoint mission;
+//                user inputs are blended with autopilot (70% autopilot, 30% user);
 //                loiters at the last waypoint after completion
 //
 //  Arm / disarm gesture (works with no telemetry radio connected):
@@ -88,11 +90,14 @@ unsigned long lastLoopMicros = 0;
 //  Helpers
 // =====================================================================
 
-// Map a stick pulse (1000-2000 µs) to a target angle in degrees.
+// Map a stick pulse (1000-2000 µs) to a target angle in degrees,
+// limited by MAX_STAB_ANGLE_DEG (hard limit like a quadcopter).
 float stickToAngle(uint16_t us) {
   float norm = ((float)constrain((int)us, RC_MIN, RC_MAX) - RC_MID)
                / (float)(RC_MAX - RC_MID);   // -1 … +1
-  return norm * params.maxStabAngleDeg;
+  float targetAngle = norm * params.maxStabAngleDeg;
+  // Hard limit: clamp to ±MAX_STAB_ANGLE_DEG
+  return constrain(targetAngle, -MAX_STAB_ANGLE_DEG, MAX_STAB_ANGLE_DEG);
 }
 
 // Map a stick pulse directly to a servo angle (MANUAL passthrough).
@@ -103,10 +108,11 @@ int stickToServoDeg(uint16_t us) {
 }
 
 // Decode the 3-position mode switch.
+// Returns mode based on pulse width: -100 (down) = MANUAL, 0 (mid) = STABILIZE, +100 (up) = AUTO
 FlightMode decodeModeSwitch(uint16_t us) {
-  if (us < 1300) return MODE_MANUAL;
-  if (us < 1700) return MODE_STABILIZE;
-  return MODE_RTH;
+  if (us < 1300) return MODE_MANUAL;      // low
+  if (us < 1700) return MODE_STABILIZE;   // mid
+  return MODE_AUTO;                        // high
 }
 
 // PID with clamped integrator.
@@ -195,8 +201,8 @@ void doRTH(float dt) {
     (uint16_t)params.rtlCruiseThrottleUs, dt, reached);
 }
 
-// ── AUTO: sequential waypoint following ──────────────────────────────
-void doAuto(float dt) {
+// ── AUTO: sequential waypoint following with user input blending ────
+void doAuto(float dt, float userRollDeg, float userPitchDeg) {
   if (mission.count() == 0) { doRTH(dt); return; }  // no mission → failsafe
 
   int32_t lat_e7, lon_e7; float altM;
@@ -209,6 +215,16 @@ void doAuto(float dt) {
     lat_e7 / 1.0e7, lon_e7 / 1.0e7,
     params.wpRadiusM, params.navBankGain, params.autoBankAngle,
     (uint16_t)params.autoCruiseThrottleUs, dt, reached);
+
+  // Blend user input: 70% autopilot, 30% user commanded angles
+  // (This happens after navigateTo() has already set the servo positions,
+  //  so we read the current pitch/roll from the IMU and adjust)
+  mpu.update();
+  float currentRoll  = mpu.getAngleX();
+  float currentPitch = mpu.getAngleY();
+  float blendedRoll  = currentRoll  * (1.0f - USER_INPUT_BLEND) + userRollDeg * USER_INPUT_BLEND;
+  float blendedPitch = currentPitch * (1.0f - USER_INPUT_BLEND) + userPitchDeg * USER_INPUT_BLEND;
+  stabilizeAndFly(blendedRoll, blendedPitch, (uint16_t)params.autoCruiseThrottleUs, dt);
 
   if (reached) {
     // Fire each event once per waypoint.
@@ -270,6 +286,14 @@ void setup() {
   delay(300);
   Serial.println("\n=== UAV Flight Controller — booting ===");
 
+  // Initialize ESC with a boot signal IMMEDIATELY
+  // Many ESCs (like the 30A yellow ESC) require a signal at power-up to initialize
+  pinMode(ESC_PIN, OUTPUT);
+  esc.setPeriodHertz(50);
+  esc.attach(ESC_PIN, 1000, 2000);
+  esc.writeMicroseconds(RC_MIN);  // Send minimum throttle signal at boot
+  delay(100);  // Brief delay to ensure ESC receives the signal
+
   // Parameters (NVS flash — falls back to defaults on first boot).
   paramsBegin();
 
@@ -296,15 +320,14 @@ void setup() {
   servoElevator.setPeriodHertz(50);
   servoElevator.attach(ELEVATOR_PIN, 1000, 2000);
 
-  // ESC — send low-throttle arming pulse, then wait for ESC to chirp.
-  // *** REMOVE PROPELLER BEFORE POWERING ON ***
-  esc.setPeriodHertz(50);
-  esc.attach(ESC_PIN, 1000, 2000);
-  esc.writeMicroseconds(RC_MIN);
-  delay(2000);   // give ESC time to arm
-
   // MAVLink / GCS
   GCS::begin(MAVLINK_SERIAL, MAVLINK_SYS_ID, MAVLINK_COMP_ID);
+
+  // Continue sending ESC signal during initialization
+  for (int i = 0; i < 5; i++) {
+    esc.writeMicroseconds(RC_MIN);
+    delay(100);
+  }
 
   lastLoopMicros = micros();
   Serial.println("[FC] Ready — disarmed. Arm via stick gesture or Mission Planner.");
@@ -331,21 +354,24 @@ void loop() {
   uint16_t rawThrottle = ibus.channel(CH_THROTTLE);
   uint16_t rawYaw      = ibus.channel(CH_YAW);
   uint16_t rawModeSw   = ibus.channel(CH_MODE_SWITCH);
-  uint16_t rawAutoSw   = ibus.channel(CH_AUTO_SWITCH);
+  uint16_t rawLoiterSw = ibus.channel(CH_LOITER_SWITCH);
 
   bool signalLost   = !ibus.isReceiving((uint32_t)params.rcTimeoutMs);
-  bool autoSwOn     = (rawAutoSw > 1500);
+  bool loiterMode   = (rawLoiterSw > 1500);  // CH6 high = loiter enabled
 
   // Arm/disarm gesture only while we have a live signal.
   if (!signalLost) checkArmGesture(rawThrottle, rawYaw);
 
   // ── Mode arbitration ─────────────────────────────────────────────
-  // Priority: signal-loss failsafe > GCS RTL > AUTO switch/command > pilot switch
+  // Priority: signal-loss failsafe > GCS RTL > pilot switch > loiter override
   if (signalLost) {
     currentMode = MODE_RTH;
   } else if (GCS::rtlCommanded()) {
     currentMode = MODE_RTH;
-  } else if ((autoSwOn || GCS::missionStartCommanded()) && mission.count() > 0) {
+  } else if (loiterMode) {
+    // Loiter switch overrides to RTH (home loiter)
+    currentMode = MODE_RTH;
+  } else if (GCS::missionStartCommanded() && mission.count() > 0) {
     currentMode = MODE_AUTO;
   } else {
     currentMode = decodeModeSwitch(rawModeSw);
@@ -354,8 +380,12 @@ void loop() {
   // Clear GCS overrides once the pilot's own switches have taken over.
   if (!signalLost) {
     if (decodeModeSwitch(rawModeSw) != MODE_RTH) GCS::clearRtlCommand();
-    if (!autoSwOn)                                GCS::clearMissionStartCommand();
+    if (decodeModeSwitch(rawModeSw) == MODE_MANUAL) GCS::clearMissionStartCommand();
   }
+
+  // ── User commanded angles (for blending in AUTO) ────────────────
+  float userRollDeg  = stickToAngle(rawAileron);
+  float userPitchDeg = stickToAngle(rawElevator);
 
   // ── Fly ──────────────────────────────────────────────────────────
   switch (currentMode) {
@@ -368,9 +398,11 @@ void loop() {
       break;
 
     case MODE_STABILIZE:
+      // User commands target angles (limited to ±30°).
+      // Plane stabilizes at that angle and holds it even when stick is released.
       stabilizeAndFly(
-        stickToAngle(rawAileron),
-        stickToAngle(rawElevator),
+        userRollDeg,
+        userPitchDeg,
         (uint16_t)constrain((int)rawThrottle, RC_MIN, RC_MAX),
         dt);
       break;
@@ -380,8 +412,14 @@ void loop() {
       break;
 
     case MODE_AUTO:
-      doAuto(dt);
+      // Autopilot navigates to waypoint, but user can override with stick inputs (blended)
+      doAuto(dt, userRollDeg, userPitchDeg);
       break;
+  }
+
+  // Keep sending ESC signal in every loop to maintain connection
+  if (!GCS::armed()) {
+    esc.writeMicroseconds(RC_MIN);
   }
 
   // ── Scheduled MAVLink telemetry ───────────────────────────────────

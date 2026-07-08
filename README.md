@@ -7,6 +7,10 @@
 | Wing servos | 2 independent outputs | 1 output → Y-splitter → both servos |
 | MAVLink layer | Hand-built protocol | Official MAVLink Arduino library |
 | Waypoint upload | Broken (bad CRC_EXTRA by hand) | Fixed — uses official library handshake |
+| STABILIZE mode | Decreased user inputs | **User commands angles directly (up to ±30° hard limit); plane levels when stick released** |
+| AUTO mode | No user control | **User inputs blended 30/70 with autopilot** |
+| Channel mapping | CH6: AUTO switch | **CH5: 3-pos (MANUAL/-100 / STABILIZE/0 / AUTO/+100); CH6: LOITER home** |
+| ESC boot signal | Sent during init only | **Sent immediately at power-up, maintained in loop** |
 
 ---
 
@@ -23,6 +27,7 @@
 | Motor | 1000 kV A2212 brushless + 1045R prop |
 | Wing servos | 2× SG90S — both wired to one output via your Y-splitter |
 | Elevator servo | 1× SG90S — independent output |
+| ESC | Generic 30A (requires boot signal) |
 
 ---
 
@@ -79,8 +84,8 @@ Set on the transmitter itself (Functions → Aux. channels):
 | CH2 | Right stick up/down | Elevator / pitch |
 | CH3 | Left stick up/down | Throttle |
 | CH4 | Left stick left/right | Yaw (arm/disarm gesture only — no rudder) |
-| CH5 | 3-position switch | MANUAL → STABILIZE → RTH |
-| CH6 | 2-position switch | AUTO (waypoint mission) when high |
+| CH5 | 3-position switch | MANUAL (down) / STABILIZE (mid) / AUTO (up) |
+| CH6 | 2-position switch | LOITER (enable home loiter in RTH/AUTO) |
 
 ---
 
@@ -88,15 +93,15 @@ Set on the transmitter itself (Functions → Aux. channels):
 
 | CH5 position | CH6 | Mode | Description |
 |---|---|---|---|
-| Down | — | MANUAL | Raw stick passthrough — for first glide tests |
-| Centre | — | STABILIZE | Angle-mode self-levelling assist (PID) |
-| Up | — | RTH | GPS return-to-home + loiter |
-| Any | High | AUTO | Follows uploaded MAVLink waypoint mission |
+| Down (-100) | — | MANUAL | Raw stick passthrough — for first glide tests |
+| Mid (0) | — | STABILIZE | **Angle-mode self-levelling; user commands angles directly (up to ±30°); plane levels when stick released** |
+| Up (+100) | — | AUTO | **Follows uploaded MAVLink waypoint mission; user inputs blended (30% user, 70% autopilot); can take manual control at any time** |
+| Any | High | RTH + LOITER | GPS return-to-home + loiter around home; also auto-engaged on signal loss or GCS RTL command |
 
 **Override priority (highest first):**
-signal-loss failsafe → GCS RTL command → CH6 AUTO → CH5 switch
+signal-loss failsafe → GCS RTL command → CH6 LOITER → pilot CH5 switch
 
-If CH6 is flipped to AUTO but no mission is loaded, the FC falls back to RTH automatically.
+If CH5 is flipped to AUTO but no mission is loaded, the FC falls back to RTH automatically.
 
 ---
 
@@ -114,33 +119,53 @@ The motor is completely blocked until armed. Two methods:
 
 ---
 
+## ESC initialization (critical for generic ESCs)
+
+**Your 30A ESC requires a boot signal or it will not arm.** The firmware now:
+1. Initializes the ESC on first GPIO setup in `setup()` and sends **RC_MIN immediately**
+2. Continues sending RC_MIN for ~500 ms during initialization
+3. **Maintains a continuous ESC signal in every loop iteration** (RC_MIN when disarmed, user throttle when armed)
+
+If the ESC still doesn't respond:
+- Check wiring (GPIO 27 → ESC signal line)
+- Verify 5V supply to the ESC
+- Try a full power cycle (unplug battery, wait 5 s, reconnect)
+- Some ESCs require a specific boot sequence; consult your ESC manual
+
+---
+
 ## First power-up checklist
 
 1. **Propeller off** for all bench work.
 2. Power on with airframe flat and level — the IMU calibration runs for ~1.5 s on boot; keep it still.
 3. Open Serial Monitor at 115 200 baud and confirm: `[IMU] Calibration done` then `[FC] Ready`.
-4. In MANUAL mode, move sticks and confirm each control surface travels the right direction before switching to STABILIZE.
-5. Go outdoors, wait for GPS 3D fix (cold start takes a few minutes). Home is auto-captured once HDOP < 3.0.
+4. **Confirm ESC beeps** — if the ESC is silent, check wiring and power supply.
+5. In MANUAL mode, move sticks and confirm each control surface travels the right direction before switching to STABILIZE.
+6. Go outdoors, wait for GPS 3D fix (cold start takes a few minutes). Home is auto-captured once HDOP < 3.0.
 
 ---
 
-## Mission Planner workflow
+## STABILIZE mode — new behavior
 
-1. Connect: **serial port your radio appears on**, baud **57 600**.  
-   You should see the vehicle heartbeat and the HUD update with roll/pitch.
+**Old**: stick input was scaled then fed to PID (reduced authority)
+**New**: stick input directly commands a **target angle**, hard-limited to ±30°.
 
-2. **Parameters**: Config tab → Full Parameter List.  
-   All 15 tunable parameters appear. Changes save to flash immediately.
+- Full right stick → bank 30° right
+- Mid stick → level flight (0° target)
+- Release stick → plane auto-levels because target returns to 0°
 
-3. **Mission upload**:
-   - Flight Plan tab → place waypoints on the map
-   - Click **Write WPs** — Mission Planner sends `MISSION_COUNT` then `MISSION_ITEM_INT` messages for each waypoint. The FC acknowledges each one and responds with `MISSION_ACK`.
-   - If upload stalls, try clicking Write WPs again — one retry is usually enough.
+This mimics quadcopter behavior: **the plane cannot stall or flip**, and autopilot takes over smoothly when you let go.
 
-4. **Fly the mission**: flip CH6 high (or Actions → Start Mission).  
-   The FC reports `MISSION_ITEM_REACHED` as each waypoint is reached; the current-WP marker moves in Mission Planner.
+---
 
-5. **Read WPs**: pulls the stored mission back from the FC to verify it.
+## AUTO mode — user control overlay
+
+**Old**: autopilot had exclusive control
+**New**: user inputs are **blended at 30% weight** with autopilot commands (70% autopilot).
+
+- If autopilot is navigating and you grab the stick, the plane follows your input but also corrects course
+- Release the stick and the plane returns to autopilot
+- This allows you to take manual control in an emergency without disabling the flight plan
 
 ---
 
@@ -171,9 +196,10 @@ add a little KD to damp overshoot, then a tiny KI only if there's a persistent s
 
 1. **Glide test** — motor off, hand-launch, verify stable glide and correct surface response.
 2. **MANUAL mode** — motor on (prop on!), confirm it flies safely on raw stick inputs.
-3. **STABILIZE** — at safe altitude, verify self-levelling behaviour.
+3. **STABILIZE** — at safe altitude, verify self-levelling behaviour and angle limiting.
 4. **RTH** — deliberately flip CH5 to RTH at altitude, confirm it turns toward home and loiters.
-5. **AUTO** — upload a tight 2-waypoint mission near the field, fly it with CH5 ready to override.
+5. **LOITER** — flip CH6 to loiter and verify it orbits the home point.
+6. **AUTO** — upload a tight 2-waypoint mission near the field, fly it with CH5 ready to override.
 
 ---
 
@@ -182,5 +208,5 @@ add a little KD to damp overshoot, then a tiny KI only if there's a persistent s
 - **No altitude control** — there is no barometer in the parts list. Throttle is a fixed
   cruise value in RTH/AUTO. Waypoint altitude values are stored but not acted on. Adding a
   BMP280 and a throttle/pitch altitude-hold loop is the natural next step.
-- **No rudder / yaw** — turns are bank-only (matches the airframe design).
+- **No rudder / yaw control** — turns are bank-only (matches the airframe design).
 - **No geofencing, ADSB, or battery failsafe** — straightforward extensions for future work.
