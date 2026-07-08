@@ -7,6 +7,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <MPU6050_light.h>
 
 #define IMU_CALIB_NAMESPACE "imu_cal"
 
@@ -18,11 +19,10 @@ struct IMUOffsets {
 extern IMUOffsets imuOffsets;
 
 // Load IMU offsets from NVS flash. Returns true if found, false if not yet calibrated.
-bool imuCalibLoad();
+bool imuCalibLoad(MPU6050 &mpu);
 
-// Save IMU offsets to NVS flash.
-void imuCalibSave(float accelX, float accelY, float accelZ,
-                  float gyroX, float gyroY, float gyroZ);
+// Save IMU offsets to NVS flash from the MPU6050 object.
+void imuCalibSave(MPU6050 &mpu);
 
 // Clear saved calibration (useful for emergency reset).
 void imuCalibClear();

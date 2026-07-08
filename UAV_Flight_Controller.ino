@@ -171,21 +171,14 @@ void handleCalibMenu() {
           Serial.println("Keep airframe LEVEL and STILL for 2 seconds...");
           delay(2000);
           mpu.calcOffsets(true, true);
-          imuCalibSave(mpu.getAccelOffsetX(), mpu.getAccelOffsetY(), mpu.getAccelOffsetZ(),
-                       mpu.getGyroOffsetX(), mpu.getGyroOffsetY(), mpu.getGyroOffsetZ());
+          imuCalibSave(mpu);
           Serial.println("[IMU] ✓ Calibration saved to flash!");
           Serial.println("     You can now remove power and install in the plane.");
           break;
           
         case '2':
-          if (imuCalibLoad()) {
+          if (imuCalibLoad(mpu)) {
             Serial.println("[IMU] ✓ Loading saved calibration...");
-            mpu.setAccelOffsetX(imuOffsets.accelX);
-            mpu.setAccelOffsetY(imuOffsets.accelY);
-            mpu.setAccelOffsetZ(imuOffsets.accelZ);
-            mpu.setGyroOffsetX(imuOffsets.gyroX);
-            mpu.setGyroOffsetY(imuOffsets.gyroY);
-            mpu.setGyroOffsetZ(imuOffsets.gyroZ);
             Serial.println("[IMU] Offsets applied.");
           } else {
             Serial.println("[IMU] ✗ No saved calibration found.");
@@ -199,12 +192,12 @@ void handleCalibMenu() {
           
         case '4':
           Serial.println("\nCurrent IMU Offsets:");
-          Serial.print("  AccelX: "); Serial.println(mpu.getAccelOffsetX(), 6);
-          Serial.print("  AccelY: "); Serial.println(mpu.getAccelOffsetY(), 6);
-          Serial.print("  AccelZ: "); Serial.println(mpu.getAccelOffsetZ(), 6);
-          Serial.print("  GyroX:  "); Serial.println(mpu.getGyroOffsetX(), 6);
-          Serial.print("  GyroY:  "); Serial.println(mpu.getGyroOffsetY(), 6);
-          Serial.print("  GyroZ:  "); Serial.println(mpu.getGyroOffsetZ(), 6);
+          Serial.print("  AccelX: "); Serial.println(mpu.getAccXoffset(), 6);
+          Serial.print("  AccelY: "); Serial.println(mpu.getAccYoffset(), 6);
+          Serial.print("  AccelZ: "); Serial.println(mpu.getAccZoffset(), 6);
+          Serial.print("  GyroX:  "); Serial.println(mpu.getGyroXoffset(), 6);
+          Serial.print("  GyroY:  "); Serial.println(mpu.getGyroYoffset(), 6);
+          Serial.print("  GyroZ:  "); Serial.println(mpu.getGyroZoffset(), 6);
           Serial.println();
           showCalibMenu();
           continue;  // prompt again
@@ -403,14 +396,7 @@ void setup() {
   }
   
   // Try to load saved calibration first
-  if (imuCalibLoad()) {
-    Serial.println("[IMU] Loading saved calibration...");
-    mpu.setAccelOffsetX(imuOffsets.accelX);
-    mpu.setAccelOffsetY(imuOffsets.accelY);
-    mpu.setAccelOffsetZ(imuOffsets.accelZ);
-    mpu.setGyroOffsetX(imuOffsets.gyroX);
-    mpu.setGyroOffsetY(imuOffsets.gyroY);
-    mpu.setGyroOffsetZ(imuOffsets.gyroZ);
+  if (imuCalibLoad(mpu)) {
     Serial.println("[IMU] ✓ Calibration loaded from flash.");
   } else {
     Serial.println("[IMU] No saved calibration found.");
